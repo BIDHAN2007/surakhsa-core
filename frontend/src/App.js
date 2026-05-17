@@ -1,3 +1,4 @@
+import BandMode from "./pages/BandMode";
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
@@ -20,6 +21,7 @@ function App() {
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/patient" element={<PatientPage />} />
         <Route path="/demo" element={<DemoPage />} />
+        <Route path="/band" element={<BandMode />} />
       </Routes>
     </Router>
   );
