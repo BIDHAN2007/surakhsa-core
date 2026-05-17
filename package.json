@@ -1,0 +1,33 @@
+{
+  "name": "surakhsa-core",
+  "version": "1.0.0",
+  "description": "Surakhsa Core - Smart Healthcare Emergency Monitoring System",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "nodemon server.js",
+    "client": "cd frontend && npm start",
+    "build": "cd frontend && npm install && npm run build",
+    "start": "node server.js",
+    "postinstall": "cd frontend && npm install",
+    "deploy:render": "npm run build && NODE_ENV=production node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "firebase": "^9.23.0",
+    "firebase-admin": "^11.11.0",
+    "mongoose": "^7.5.0",
+    "twilio": "^4.19.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "nodemailer": "^6.9.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "concurrently": "^8.2.1"
+  }
+}
