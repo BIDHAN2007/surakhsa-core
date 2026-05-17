@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: surakhsa-core-frontend
+    env: static
+    buildCommand: npm run build
+    startCommand: ""
+    staticPublicPath: build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://surakhsa-core.onrender.com/api
