@@ -85,23 +85,20 @@ useEffect(() => {
       setFallDetected(true);
       setTransmitting(true);
 
-      // Vibration feedback
+      // Vibration feedback (silent alert to user)
       if (navigator.vibrate) {
         navigator.vibrate([300, 100, 300, 100, 300]);
       }
 
-      // Alert user
-      alert("🚨 FALL DETECTED!\n\nSending emergency alert to guardian...");
-
-      // Get GPS coordinates
+      // Auto-send emergency alert (silent, no popups)
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const latitude = pos.coords.latitude;
           const longitude = pos.coords.longitude;
 
-          console.log("📍 Fall location:", latitude, longitude);
+          console.log("🚨 FALL DETECTED - Location:", latitude, longitude, "Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2));
 
-          // Send emergency alert to backend
+          // Send emergency alert to backend (silent)
           fetch("https://surakhsa-core.onrender.com/api/emergency", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -115,12 +112,23 @@ useEffect(() => {
               deviceId: deviceId,
             }),
           }).catch(err => console.error("Emergency send error:", err));
-
-          alert(`🚨 Emergency Alert Sent!\n\nLocation: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
         },
         (err) => {
-          console.error("GPS error:", err);
-          alert("⚠️ Fall detected but GPS unavailable. Guardian still notified.");
+          console.error("GPS error during fall detection:", err);
+          // Still send emergency even without GPS
+          fetch("https://surakhsa-core.onrender.com/api/emergency", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "fall_detected",
+              latitude: null,
+              longitude: null,
+              accelerationForce: accelMagnitude,
+              rotationForce: rotationMagnitude,
+              timestamp: new Date().toISOString(),
+              deviceId: deviceId,
+            }),
+          }).catch(err => console.error("Emergency send error:", err));
         }
       );
 
