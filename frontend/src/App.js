@@ -15,7 +15,7 @@ function App() {
     <Router>
       <Toaster position="top-right" />
       <Routes>
-        <Route path="/" element={<PatientPage />} />
+        <Route path="/" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/admin" element={<AdminDashboard />} />

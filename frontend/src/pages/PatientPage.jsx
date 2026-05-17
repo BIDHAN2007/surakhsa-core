@@ -43,30 +43,90 @@ export default function PatientPage() {
   }, [isSetup]);
 
   // 2. Fall Detection (Accelerometer)
-  useEffect(() => {
-    if (!isSetup || typeof window === 'undefined') return;
-    
-    // Ignore initial sensor boot-up noise for 2 seconds
-    sensorReadyRef.current = false;
-    const timer = setTimeout(() => { sensorReadyRef.current = true; }, 2000);
-    
-    const handleMotion = (event) => {
-      if (!sensorReadyRef.current) return;
-      if (!event.accelerationIncludingGravity) return;
-      const { x, y, z } = event.accelerationIncludingGravity;
-      const magnitude = Math.sqrt(x*x + y*y + z*z);
-      // Increased to > 22 to prevent false alarms when picking up the phone.
-      if (magnitude > 22) {
-        setFallDetected(true);
-        // Turn on transmitting if a fall is detected
-        setTransmitting(true);
-        setTimeout(() => setFallDetected(false), 10000); // reset alert after 10s
-      }
-    };
+useEffect(() => {
+  if (!isSetup || typeof window === 'undefined') return;
 
-    window.addEventListener('devicemotion', handleMotion);
-    return () => window.removeEventListener('devicemotion', handleMotion);
-  }, [isSetup]);
+  let fallCooldown = false;
+
+  // Ignore initial sensor noise
+  sensorReadyRef.current = false;
+
+  const timer = setTimeout(() => {
+    sensorReadyRef.current = true;
+  }, 2000);
+
+  const handleMotion = (event) => {
+
+    if (!sensorReadyRef.current) return;
+    if (!event.accelerationIncludingGravity) return;
+
+    const { x, y, z } = event.accelerationIncludingGravity;
+
+    const magnitude = Math.sqrt(x * x + y * y + z * z);
+
+    console.log("Force:", magnitude);
+
+    // Stronger detection
+    if (magnitude > 25 && !fallCooldown) {
+
+      fallCooldown = true;
+
+      setFallDetected(true);
+
+      // Auto start transmitting
+      setTransmitting(true);
+
+      alert("🚨 FALL DETECTED!");
+
+      // Get GPS location
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+
+          const latitude = pos.coords.latitude;
+          const longitude = pos.coords.longitude;
+
+          console.log(latitude, longitude);
+
+          // Send emergency alert
+          fetch("https://surakhsa-core.onrender.com/api/emergency", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              type: "fall",
+              latitude,
+              longitude,
+              timestamp: new Date(),
+            }),
+          });
+
+          alert(
+            `🚨 Emergency Alert Sent!\nLat: ${latitude}\nLng: ${longitude}`
+          );
+        },
+        (err) => {
+          console.log(err);
+          alert("Location permission denied");
+        }
+      );
+
+      // Reset after 10 seconds
+      setTimeout(() => {
+        setFallDetected(false);
+        fallCooldown = false;
+      }, 10000);
+    }
+  };
+
+  window.addEventListener('devicemotion', handleMotion);
+
+  return () => {
+    clearTimeout(timer);
+    window.removeEventListener('devicemotion', handleMotion);
+  };
+
+}, [isSetup]);
 
   // 3. Camera Heart Rate Monitor (PPG - Photoplethysmography)
   const measureHeartRate = async () => {
