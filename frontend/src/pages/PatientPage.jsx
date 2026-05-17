@@ -42,91 +42,161 @@ export default function PatientPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [isSetup]);
 
-  // 2. Fall Detection (Accelerometer)
+ // 2. Impact / Fall Detection with Accelerometer + Gyroscope
 useEffect(() => {
+
   if (!isSetup || typeof window === 'undefined') return;
 
-  let fallCooldown = false;
-
-  // Ignore initial sensor noise
+  let impactCooldown = false;
+  let lastFallTime = 0;
+  let accelerationHistory = [];
+  let rotationHistory = [];
+  const historySize = 30; // Keep last 30 readings
+  
   sensorReadyRef.current = false;
 
   const timer = setTimeout(() => {
     sensorReadyRef.current = true;
+    console.log("Fall detection sensors ready");
   }, 2000);
 
-  const handleMotion = (event) => {
+  const detectFall = (accelMagnitude, rotationMagnitude) => {
+    const now = Date.now();
+    
+    // Ignore if in cooldown
+    if (now - lastFallTime < 5000) return;
 
-    if (!sensorReadyRef.current) return;
-    if (!event.accelerationIncludingGravity) return;
-
-    const { x, y, z } = event.accelerationIncludingGravity;
-
-    const magnitude = Math.sqrt(x * x + y * y + z * z);
-
-    console.log("Force:", magnitude);
-
-    // Stronger detection
-    if (magnitude > 25 && !fallCooldown) {
-
-      fallCooldown = true;
-
+    // Fall detection algorithm:
+    // 1. High impact force (sudden movement)
+    // 2. High rotation (spinning/tumbling)
+    // 3. Both together = very likely a fall
+    
+    const highImpact = accelMagnitude > 25; // Strong impact
+    const highRotation = rotationMagnitude > 200; // Rapid rotation (deg/sec)
+    const extremeImpact = accelMagnitude > 35; // Very strong hit (definite fall)
+    
+    if (extremeImpact || (highImpact && highRotation)) {
+      
+      lastFallTime = now;
+      impactCooldown = true;
+      
+      console.log("🚨 FALL DETECTED - Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2));
+      
       setFallDetected(true);
-
-      // Auto start transmitting
       setTransmitting(true);
 
-      alert("🚨 FALL DETECTED!");
+      // Vibration feedback
+      if (navigator.vibrate) {
+        navigator.vibrate([300, 100, 300, 100, 300]);
+      }
 
-      // Get GPS location
+      // Alert user
+      alert("🚨 FALL DETECTED!\n\nSending emergency alert to guardian...");
+
+      // Get GPS coordinates
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-
           const latitude = pos.coords.latitude;
           const longitude = pos.coords.longitude;
 
-          console.log(latitude, longitude);
+          console.log("📍 Fall location:", latitude, longitude);
 
-          // Send emergency alert
+          // Send emergency alert to backend
           fetch("https://surakhsa-core.onrender.com/api/emergency", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              type: "fall",
+              type: "fall_detected",
               latitude,
               longitude,
-              timestamp: new Date(),
+              accelerationForce: accelMagnitude,
+              rotationForce: rotationMagnitude,
+              timestamp: new Date().toISOString(),
+              deviceId: deviceId,
             }),
-          });
+          }).catch(err => console.error("Emergency send error:", err));
 
-          alert(
-            `🚨 Emergency Alert Sent!\nLat: ${latitude}\nLng: ${longitude}`
-          );
+          alert(`🚨 Emergency Alert Sent!\n\nLocation: ${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
         },
         (err) => {
-          console.log(err);
-          alert("Location permission denied");
+          console.error("GPS error:", err);
+          alert("⚠️ Fall detected but GPS unavailable. Guardian still notified.");
         }
       );
 
-      // Reset after 10 seconds
+      // Auto-reset after 10 seconds
       setTimeout(() => {
         setFallDetected(false);
-        fallCooldown = false;
+        impactCooldown = false;
       }, 10000);
     }
   };
 
-  window.addEventListener('devicemotion', handleMotion);
+  const handleMotion = (event) => {
+    if (!sensorReadyRef.current) return;
+
+    // Accelerometer: acceleration including gravity
+    if (event.accelerationIncludingGravity) {
+      const { x, y, z } = event.accelerationIncludingGravity;
+      const accelMagnitude = Math.sqrt(x * x + y * y + z * z);
+      
+      accelerationHistory.push(accelMagnitude);
+      if (accelerationHistory.length > historySize) {
+        accelerationHistory.shift();
+      }
+    }
+
+    // Gyroscope: rotational velocity (if available)
+    if (event.rotationRate) {
+      const { alpha, beta, gamma } = event.rotationRate;
+      const rotationMagnitude = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
+      
+      rotationHistory.push(rotationMagnitude);
+      if (rotationHistory.length > historySize) {
+        rotationHistory.shift();
+      }
+    }
+
+    // Analyze recent history
+    if (accelerationHistory.length >= 5 && rotationHistory.length >= 5) {
+      const avgAccel = accelerationHistory.reduce((a, b) => a + b, 0) / accelerationHistory.length;
+      const maxAccel = Math.max(...accelerationHistory);
+      const avgRotation = rotationHistory.reduce((a, b) => a + b, 0) / rotationHistory.length;
+      const maxRotation = Math.max(...rotationHistory);
+
+      // Spike detection: sudden change from average
+      const accelSpike = maxAccel > avgAccel * 2.5 && maxAccel > 25;
+      const rotationSpike = maxRotation > avgRotation * 2.0 && maxRotation > 150;
+
+      if (accelSpike || rotationSpike) {
+        detectFall(maxAccel, maxRotation);
+      }
+    }
+  };
+
+  // Request motion sensor permission (iOS 13+)
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    DeviceMotionEvent.requestPermission()
+      .then(permissionState => {
+        if (permissionState === 'granted') {
+          window.addEventListener('devicemotion', handleMotion, false);
+          console.log("✅ Motion permission granted");
+        } else {
+          console.warn("Motion permission denied");
+        }
+      })
+      .catch(console.error);
+  } else {
+    // Non-iOS devices, permission already granted
+    window.addEventListener('devicemotion', handleMotion, false);
+  }
 
   return () => {
     clearTimeout(timer);
     window.removeEventListener('devicemotion', handleMotion);
   };
 
-}, [isSetup]);
+}, [isSetup, deviceId]);
 
   // 3. Camera Heart Rate Monitor (PPG - Photoplethysmography)
   const measureHeartRate = async () => {
@@ -266,9 +336,12 @@ useEffect(() => {
     localStorage.setItem('p_deviceId', deviceId.trim());
     setIsSetup(true);
     
-    // Request permission for iOS motion sensors on setup click (must be triggered by user action)
+    // Request permissions for iOS motion sensors (must be triggered by user action)
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      DeviceMotionEvent.requestPermission().catch(console.error);
+      Promise.all([
+        DeviceMotionEvent.requestPermission?.(),
+        DeviceOrientationEvent.requestPermission?.()
+      ]).catch(console.error);
     }
   };
 
@@ -365,7 +438,10 @@ useEffect(() => {
         <motion.button whileTap={{ scale: 0.96 }} 
           onClick={() => {
             if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-              DeviceMotionEvent.requestPermission().catch(console.error);
+              Promise.all([
+                DeviceMotionEvent.requestPermission?.(),
+                DeviceOrientationEvent.requestPermission?.()
+              ]).catch(console.error);
             }
             setTransmitting(t => !t);
           }}
