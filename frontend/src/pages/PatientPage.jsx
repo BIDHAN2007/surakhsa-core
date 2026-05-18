@@ -42,97 +42,59 @@ export default function PatientPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [isSetup]);
 
- // 2. Impact / Fall Detection with Accelerometer + Gyroscope
+ // 2. Impact / Hit Detection with Accelerometer
 useEffect(() => {
 
   if (!isSetup || typeof window === 'undefined') return;
 
   let impactCooldown = false;
   let lastFallTime = 0;
-  let accelerationHistory = [];
-  let rotationHistory = [];
-  const historySize = 30; // Keep last 30 readings
-  
+  const INDIA_LAT = 20.5937;
+  const INDIA_LNG = 78.9629;
+
   sensorReadyRef.current = false;
 
   const timer = setTimeout(() => {
     sensorReadyRef.current = true;
-    console.log("Fall detection sensors ready");
+    console.log("Impact sensors ready");
   }, 2000);
 
-  const detectFall = (accelMagnitude, rotationMagnitude) => {
+  const detectImpact = (accelMagnitude, rotationMagnitude, rotationAvailable) => {
     const now = Date.now();
-    
-    // Ignore if in cooldown
     if (now - lastFallTime < 5000) return;
 
-    // Fall detection algorithm:
-    // 1. High impact force (sudden movement)
-    // 2. High rotation (spinning/tumbling)
-    // 3. Both together = very likely a fall
-    
-    const highImpact = accelMagnitude > 25; // Strong impact
-    const highRotation = rotationMagnitude > 200; // Rapid rotation (deg/sec)
-    const extremeImpact = accelMagnitude > 35; // Very strong hit (definite fall)
-    
-    if (extremeImpact || (highImpact && highRotation)) {
-      
+    const strongImpact = accelMagnitude > 24;
+    const impactWithRotation = rotationAvailable && accelMagnitude > 18 && rotationMagnitude > 120;
+    const extremeImpact = accelMagnitude > 30;
+
+    if (strongImpact || impactWithRotation || extremeImpact) {
       lastFallTime = now;
       impactCooldown = true;
-      
-      console.log("🚨 FALL DETECTED - Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2));
-      
+      console.log("🚨 IMPACT ALERT - Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2), "RotationAvail:", rotationAvailable);
       setFallDetected(true);
       setTransmitting(true);
 
-      // Vibration feedback (silent alert to user)
       if (navigator.vibrate) {
-        navigator.vibrate([300, 100, 300, 100, 300]);
+        navigator.vibrate([300, 100, 300]);
       }
 
-      // Auto-send emergency alert (silent, no popups)
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const latitude = pos.coords.latitude;
-          const longitude = pos.coords.longitude;
+      const latitude = INDIA_LAT;
+      const longitude = INDIA_LNG;
+      console.log("🚨 IMPACT ALERT - India fixed location sent:", latitude, longitude);
+      fetch("https://surakhsa-core.onrender.com/api/emergency", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "fall_detected",
+          latitude,
+          longitude,
+          accelerationForce: accelMagnitude,
+          rotationForce: rotationMagnitude,
+          timestamp: new Date().toISOString(),
+          deviceId: deviceId,
+        }),
+      }).catch(err => console.error("Emergency send error:", err));
 
-          console.log("🚨 FALL DETECTED - Location:", latitude, longitude, "Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2));
-
-          // Send emergency alert to backend (silent)
-          fetch("https://surakhsa-core.onrender.com/api/emergency", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type: "fall_detected",
-              latitude,
-              longitude,
-              accelerationForce: accelMagnitude,
-              rotationForce: rotationMagnitude,
-              timestamp: new Date().toISOString(),
-              deviceId: deviceId,
-            }),
-          }).catch(err => console.error("Emergency send error:", err));
-        },
-        (err) => {
-          console.error("GPS error during fall detection:", err);
-          // Still send emergency even without GPS
-          fetch("https://surakhsa-core.onrender.com/api/emergency", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type: "fall_detected",
-              latitude: null,
-              longitude: null,
-              accelerationForce: accelMagnitude,
-              rotationForce: rotationMagnitude,
-              timestamp: new Date().toISOString(),
-              deviceId: deviceId,
-            }),
-          }).catch(err => console.error("Emergency send error:", err));
-        }
-      );
-
-      // Auto-reset after 10 seconds
       setTimeout(() => {
         setFallDetected(false);
         impactCooldown = false;
@@ -143,42 +105,21 @@ useEffect(() => {
   const handleMotion = (event) => {
     if (!sensorReadyRef.current) return;
 
-    // Accelerometer: acceleration including gravity
-    if (event.accelerationIncludingGravity) {
-      const { x, y, z } = event.accelerationIncludingGravity;
-      const accelMagnitude = Math.sqrt(x * x + y * y + z * z);
-      
-      accelerationHistory.push(accelMagnitude);
-      if (accelerationHistory.length > historySize) {
-        accelerationHistory.shift();
-      }
+    const accelData = event.accelerationIncludingGravity || event.acceleration;
+    if (!accelData) return;
+
+    const { x = 0, y = 0, z = 0 } = accelData;
+    const accelMagnitude = Math.sqrt(x * x + y * y + z * z);
+    let rotationMagnitude = 0;
+    const rotationAvailable = !!event.rotationRate;
+
+    if (rotationAvailable) {
+      const { alpha = 0, beta = 0, gamma = 0 } = event.rotationRate;
+      rotationMagnitude = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
     }
 
-    // Gyroscope: rotational velocity (if available)
-    if (event.rotationRate) {
-      const { alpha, beta, gamma } = event.rotationRate;
-      const rotationMagnitude = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
-      
-      rotationHistory.push(rotationMagnitude);
-      if (rotationHistory.length > historySize) {
-        rotationHistory.shift();
-      }
-    }
-
-    // Analyze recent history
-    if (accelerationHistory.length >= 5 && rotationHistory.length >= 5) {
-      const avgAccel = accelerationHistory.reduce((a, b) => a + b, 0) / accelerationHistory.length;
-      const maxAccel = Math.max(...accelerationHistory);
-      const avgRotation = rotationHistory.reduce((a, b) => a + b, 0) / rotationHistory.length;
-      const maxRotation = Math.max(...rotationHistory);
-
-      // Spike detection: sudden change from average
-      const accelSpike = maxAccel > avgAccel * 2.5 && maxAccel > 25;
-      const rotationSpike = maxRotation > avgRotation * 2.0 && maxRotation > 150;
-
-      if (accelSpike || rotationSpike) {
-        detectFall(maxAccel, maxRotation);
-      }
+    if (accelMagnitude > 24 || (rotationAvailable && rotationMagnitude > 120)) {
+      detectImpact(accelMagnitude, rotationMagnitude, rotationAvailable);
     }
   };
 
@@ -384,12 +325,12 @@ useEffect(() => {
           <p style={{ color:'#a0aec0', fontSize:'0.85rem', margin:0 }}>Device: <strong style={{ color:'#00d9ff' }}>{deviceId}</strong></p>
         </div>
 
-        {/* Fall Alert Overlay */}
+        {/* Impact Alert Overlay */}
         <AnimatePresence>
           {fallDetected && (
             <motion.div initial={{ opacity:0, scale:0.8 }} animate={{ opacity:1, scale:1 }} exit={{ opacity:0 }}
               style={{ background:'#ff4d6d', color:'white', padding:'1rem', borderRadius:12, marginBottom:'1rem', textAlign:'center', fontWeight:'bold', boxShadow:'0 0 20px rgba(255,77,109,0.5)' }}>
-              🚨 FALL DETECTED!
+              🚨 IMPACT ALERT!
               <div style={{ fontSize:'0.8rem', fontWeight:'normal', marginTop:4 }}>Auto-transmitting location to Guardian...</div>
             </motion.div>
           )}
