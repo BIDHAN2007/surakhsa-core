@@ -19,11 +19,32 @@ export default function PatientPage() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
+  // Advanced Fall Detection State
   const [fallDetected, setFallDetected] = useState(false);
-  const sensorReadyRef = useRef(false);
   const [motionStatus, setMotionStatus] = useState('Waiting for motion sensors...');
   const [motionPermissionGranted, setMotionPermissionGranted] = useState(false);
   const [motionSupported, setMotionSupported] = useState(true);
+  const [gyroEnabled, setGyroEnabled] = useState(false);
+  const [gyroActive, setGyroActive] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [showSensorMonitor, setShowSensorMonitor] = useState(false);
+  const [emergencySent, setEmergencySent] = useState(false);
+  
+  // Real-time Sensor Data for Monitor
+  const [sensorData, setSensorData] = useState({
+    accelX: 0, accelY: 0, accelZ: 0, accelMag: 0,
+    gyroX: 0, gyroY: 0, gyroZ: 0, gyroMag: 0,
+    alpha: 0, beta: 0, gamma: 0,
+    impactForce: 0, fallStatus: 'Normal'
+  });
+
+  // Sensor Refs for advanced detection
+  const sensorReadyRef = useRef(false);
+  const sensorHistoryRef = useRef({ accel: [], gyro: [], orientation: [] });
+  const lastFallTimeRef = useRef(0);
+  const motionListenerRef = useRef(null);
+  const orientationListenerRef = useRef(null);
+
   const [spO2, setSpO2] = useState('');
   const [temperature, setTemperature] = useState('');
 
@@ -45,106 +66,330 @@ export default function PatientPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [isSetup]);
 
- // 2. Impact / Hit Detection with Accelerometer
+ // 2. ADVANCED Multi-Sensor Fall Detection System
 useEffect(() => {
-
   if (!isSetup || typeof window === 'undefined') return;
-
-  let impactCooldown = false;
-  let lastFallTime = 0;
+  
   const INDIA_LAT = 20.5937;
   const INDIA_LNG = 78.9629;
+  const SENSOR_HISTORY_SIZE = 50;
+  const IMPACT_COOLDOWN = 5000;
+  const STARTUP_DELAY = 2000;
+  let eventListenerActive = false;
 
-  sensorReadyRef.current = false;
+  // Initialize sensor history
+  sensorHistoryRef.current = { accel: [], gyro: [], orientation: [] };
 
-  const timer = setTimeout(() => {
-    sensorReadyRef.current = true;
-    console.log("Impact sensors ready");
-  }, 2000);
+  // === STEP 1: REQUEST ALL PERMISSIONS ===
+  const requestAllPermissions = async () => {
+    try {
+      const permissionsToRequest = [];
 
-  const detectImpact = (accelMagnitude, rotationMagnitude, rotationAvailable) => {
-    const now = Date.now();
-    if (now - lastFallTime < 5000) return;
-
-    const strongImpact = accelMagnitude > 24;
-    const impactWithRotation = rotationAvailable && accelMagnitude > 18 && rotationMagnitude > 120;
-    const extremeImpact = accelMagnitude > 30;
-
-    if (strongImpact || impactWithRotation || extremeImpact) {
-      lastFallTime = now;
-      impactCooldown = true;
-      console.log("🚨 IMPACT ALERT - Accel:", accelMagnitude.toFixed(2), "Rotation:", rotationMagnitude.toFixed(2), "RotationAvail:", rotationAvailable);
-      setFallDetected(true);
-      setTransmitting(true);
-
-      if (navigator.vibrate) {
-        navigator.vibrate([300, 100, 300]);
+      // DeviceMotionEvent permission (iOS 13+)
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        permissionsToRequest.push(
+          DeviceMotionEvent.requestPermission()
+            .then(state => {
+              console.log("📱 DeviceMotionEvent:", state);
+              if (state === 'granted') return true;
+              throw new Error('motion denied');
+            })
+        );
       }
 
-      const latitude = INDIA_LAT;
-      const longitude = INDIA_LNG;
-      console.log("🚨 IMPACT ALERT - India fixed location sent:", latitude, longitude);
-      fetch("https://surakhsa-core.onrender.com/api/emergency", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "fall_detected",
-          latitude,
-          longitude,
-          accelerationForce: accelMagnitude,
-          rotationForce: rotationMagnitude,
-          timestamp: new Date().toISOString(),
-          deviceId: deviceId,
-        }),
-      }).catch(err => console.error("Emergency send error:", err));
+      // DeviceOrientationEvent permission
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        permissionsToRequest.push(
+          DeviceOrientationEvent.requestPermission()
+            .then(state => {
+              console.log("📱 DeviceOrientationEvent:", state);
+              return state === 'granted';
+            })
+        );
+      }
 
-      setTimeout(() => {
-        setFallDetected(false);
-        impactCooldown = false;
-      }, 10000);
+      if (permissionsToRequest.length > 0) {
+        const results = await Promise.all(permissionsToRequest);
+        return results.every(r => r);
+      }
+      return true;
+    } catch (err) {
+      console.error("Permission error:", err);
+      setPermissionDenied(true);
+      return false;
     }
   };
 
-  const handleMotion = (event) => {
+  // === STEP 2: ADVANCED FALL DETECTION ALGORITHM ===
+  const analyzeSensorData = () => {
+    const accelHist = sensorHistoryRef.current.accel;
+    const gyroHist = sensorHistoryRef.current.gyro;
+    const orientHist = sensorHistoryRef.current.orientation;
+
+    if (accelHist.length < 5) return { isFall: false, confidence: 0 };
+
+    // Extract components
+    const recentAccel = accelHist.slice(-10);
+    const recentGyro = gyroHist.slice(-10);
+
+    // Calculate statistics
+    const accelMags = recentAccel.map(a => a.mag);
+    const gyroMags = recentGyro.map(g => g.mag);
+
+    const maxAccel = Math.max(...accelMags);
+    const avgAccel = accelMags.reduce((a, b) => a + b, 0) / accelMags.length;
+    const maxGyro = Math.max(...gyroMags);
+    const avgGyro = gyroMags.reduce((a, b) => a + b, 0) / gyroMags.length;
+
+    // === FALL DETECTION PATTERNS ===
+    let confidence = 0;
+    let fallReason = '';
+
+    // Pattern 1: Sudden extreme acceleration (impact)
+    if (maxAccel > 35) {
+      confidence += 45;
+      fallReason += 'Extreme impact ';
+    } else if (maxAccel > 28) {
+      confidence += 30;
+      fallReason += 'High impact ';
+    }
+
+    // Pattern 2: Rapid acceleration spike (3x+ baseline)
+    if (maxAccel > avgAccel * 3 && maxAccel > 20) {
+      confidence += 25;
+      fallReason += 'Rapid spike ';
+    }
+
+    // Pattern 3: High rotation/tumbling
+    if (maxGyro > 300) {
+      confidence += 30;
+      fallReason += 'Rapid rotation ';
+    } else if (maxGyro > 200 && maxAccel > 18) {
+      confidence += 20;
+      fallReason += 'Rotation+impact ';
+    }
+
+    // Pattern 4: Downward acceleration followed by stop
+    const zAccels = recentAccel.map(a => a.z);
+    const hasNegativeZ = zAccels.some(z => z < -15);
+    const hasNegativeAcc = zAccels.some(z => z > 25);
+    if (hasNegativeZ && hasNegativeAcc) {
+      confidence += 35;
+      fallReason += 'Downward motion ';
+    }
+
+    // Pattern 5: Orientation change (beta/gamma spike)
+    if (orientHist.length > 5) {
+      const betaChange = Math.max(...orientHist.slice(-5).map(o => Math.abs(o.beta)));
+      if (betaChange > 60) {
+        confidence += 20;
+        fallReason += 'Orientation change ';
+      }
+    }
+
+    return {
+      isFall: confidence > 50,
+      confidence: Math.min(100, confidence),
+      reason: fallReason.trim(),
+      metrics: { maxAccel, maxGyro, avgAccel, avgGyro }
+    };
+  };
+
+  // === STEP 3: EMERGENCY ALERT FLOW ===
+  const triggerEmergency = (analysis) => {
+    const now = Date.now();
+    if (now - lastFallTimeRef.current < IMPACT_COOLDOWN) return;
+
+    lastFallTimeRef.current = now;
+    console.log("🚨 FALL DETECTED:", analysis.reason);
+
+    // UI Feedback
+    setFallDetected(true);
+    setEmergencySent(false);
+    setTransmitting(true);
+
+    // Vibration alert
+    if (navigator.vibrate) {
+      navigator.vibrate([300, 100, 300, 100, 500]);
+    }
+
+    // Play sound (if available)
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.frequency.value = 800;
+      gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      osc.start(audioContext.currentTime);
+      osc.stop(audioContext.currentTime + 0.5);
+    } catch (e) {
+      console.log("Audio alert unavailable");
+    }
+
+    // Send emergency
+    const latitude = INDIA_LAT;
+    const longitude = INDIA_LNG;
+    const metrics = analysis.metrics;
+
+    fetch("https://surakhsa-core.onrender.com/api/emergency", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "fall_detected",
+        latitude,
+        longitude,
+        accelerationForce: metrics.maxAccel,
+        rotationForce: metrics.maxGyro,
+        confidence: analysis.confidence,
+        reason: analysis.reason,
+        timestamp: new Date().toISOString(),
+        deviceId: deviceId,
+      }),
+    })
+      .then(() => {
+        console.log("✅ Emergency sent successfully");
+        setEmergencySent(true);
+      })
+      .catch(err => console.error("Emergency send error:", err));
+
+    // Auto-reset UI after 10 seconds
+    setTimeout(() => {
+      setFallDetected(false);
+      setEmergencySent(false);
+    }, 10000);
+  };
+
+  // === STEP 4: MOTION EVENT HANDLER ===
+  const handleMotionEvent = (event) => {
     if (!sensorReadyRef.current) return;
 
+    // Get acceleration (with and without gravity)
     const accelData = event.accelerationIncludingGravity || event.acceleration;
-    if (!accelData) return;
-
-    const { x = 0, y = 0, z = 0 } = accelData;
-    const accelMagnitude = Math.sqrt(x * x + y * y + z * z);
-    let rotationMagnitude = 0;
-    const rotationAvailable = !!event.rotationRate;
-
-    if (rotationAvailable) {
-      const { alpha = 0, beta = 0, gamma = 0 } = event.rotationRate;
-      rotationMagnitude = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
+    if (accelData) {
+      const { x = 0, y = 0, z = 0 } = accelData;
+      const mag = Math.sqrt(x * x + y * y + z * z);
+      sensorHistoryRef.current.accel.push({ x, y, z, mag });
+      if (sensorHistoryRef.current.accel.length > SENSOR_HISTORY_SIZE) {
+        sensorHistoryRef.current.accel.shift();
+      }
     }
 
-    if (accelMagnitude > 24 || (rotationAvailable && rotationMagnitude > 120)) {
-      detectImpact(accelMagnitude, rotationMagnitude, rotationAvailable);
+    // Get gyroscope data
+    if (event.rotationRate) {
+      const { alpha = 0, beta = 0, gamma = 0 } = event.rotationRate;
+      const mag = Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
+      sensorHistoryRef.current.gyro.push({ alpha, beta, gamma, mag });
+      if (sensorHistoryRef.current.gyro.length > SENSOR_HISTORY_SIZE) {
+        sensorHistoryRef.current.gyro.shift();
+      }
+    }
+
+    // Update real-time display
+    const accel = sensorHistoryRef.current.accel[sensorHistoryRef.current.accel.length - 1] || {};
+    const gyro = sensorHistoryRef.current.gyro[sensorHistoryRef.current.gyro.length - 1] || {};
+
+    setSensorData(prev => ({
+      ...prev,
+      accelX: accel.x || 0,
+      accelY: accel.y || 0,
+      accelZ: accel.z || 0,
+      accelMag: accel.mag || 0,
+      gyroX: gyro.alpha || 0,
+      gyroY: gyro.beta || 0,
+      gyroZ: gyro.gamma || 0,
+      gyroMag: gyro.mag || 0,
+      impactForce: accel.mag || 0
+    }));
+
+    // Analyze and trigger if needed
+    const analysis = analyzeSensorData();
+    if (analysis.isFall) {
+      triggerEmergency(analysis);
     }
   };
+
+  // === STEP 5: ORIENTATION HANDLER ===
+  const handleOrientationEvent = (event) => {
+    if (!sensorReadyRef.current) return;
+    const { alpha = 0, beta = 0, gamma = 0 } = event;
+    sensorHistoryRef.current.orientation.push({ alpha, beta, gamma });
+    if (sensorHistoryRef.current.orientation.length > SENSOR_HISTORY_SIZE) {
+      sensorHistoryRef.current.orientation.shift();
+    }
+
+    setSensorData(prev => ({
+      ...prev,
+      alpha, beta, gamma
+    }));
+  };
+
+  // === STEP 6: STARTUP AND PERMISSION FLOW ===
+  let setupTimer = setTimeout(async () => {
+    if (gyroEnabled || motionPermissionGranted) {
+      sensorReadyRef.current = true;
+      setMotionStatus('✅ Motion sensors active');
+      setGyroActive(true);
+
+      // Attach listeners only if not already attached
+      if (!eventListenerActive) {
+        window.addEventListener('devicemotion', handleMotionEvent, false);
+        window.addEventListener('deviceorientation', handleOrientationEvent, false);
+        eventListenerActive = true;
+        motionListenerRef.current = handleMotionEvent;
+        orientationListenerRef.current = handleOrientationEvent;
+      }
+    } else {
+      setMotionStatus('Tap "Enable Gyro Sensors" to start');
+    }
+  }, STARTUP_DELAY);
+
+  // Cleanup
+  return () => {
+    clearTimeout(setupTimer);
+    if (motionListenerRef.current) {
+      window.removeEventListener('devicemotion', motionListenerRef.current);
+    }
+    if (orientationListenerRef.current) {
+      window.removeEventListener('deviceorientation', orientationListenerRef.current);
+    }
+    eventListenerActive = false;
+  };
+
+}, [isSetup, deviceId, gyroEnabled, motionPermissionGranted]);
+
+// === REQUEST GYRO PERMISSIONS HANDLER ===
+const handleEnableGyro = async () => {
+  setMotionStatus('Requesting permissions...');
+  setGyroEnabled(true);
 
   if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-    if (motionPermissionGranted) {
-      window.addEventListener('devicemotion', handleMotion, false);
-      setMotionStatus('Motion sensors active');
-      console.log("✅ Motion permission granted and listener attached");
-    } else {
-      setMotionStatus('Tap Start Sensors and allow motion access');
+    try {
+      const motionPerm = await DeviceMotionEvent.requestPermission();
+      const orientPerm = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'
+        ? await DeviceOrientationEvent.requestPermission()
+        : 'granted';
+
+      if (motionPerm === 'granted' && orientPerm === 'granted') {
+        setMotionPermissionGranted(true);
+        setMotionStatus('✅ Permissions granted');
+      } else {
+        setPermissionDenied(true);
+        setMotionStatus('❌ Permissions denied');
+      }
+    } catch (err) {
+      console.error("Permission request error:", err);
+      setPermissionDenied(true);
+      setMotionStatus('❌ Permission request failed');
     }
   } else {
-    window.addEventListener('devicemotion', handleMotion, false);
-    setMotionStatus('Motion sensors active');
+    // Non-iOS: permissions auto-granted
+    setMotionPermissionGranted(true);
+    setMotionStatus('✅ Sensors available');
   }
-
-  return () => {
-    clearTimeout(timer);
-    window.removeEventListener('devicemotion', handleMotion);
-  };
-
-}, [isSetup, deviceId, motionPermissionGranted]);
+};
 
   // 3. Camera Heart Rate Monitor (PPG - Photoplethysmography)
   const measureHeartRate = async () => {
@@ -283,28 +528,7 @@ useEffect(() => {
     if (!deviceId.trim()) return;
     localStorage.setItem('p_deviceId', deviceId.trim());
     setIsSetup(true);
-
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      DeviceMotionEvent.requestPermission()
-        .then(permissionState => {
-          if (permissionState === 'granted') {
-            setMotionPermissionGranted(true);
-            setMotionStatus('Motion sensor access granted');
-          } else {
-            setMotionPermissionGranted(false);
-            setMotionStatus('Motion sensor access denied');
-            setMotionSupported(false);
-          }
-        })
-        .catch(err => {
-          console.error('Motion permission request failed', err);
-          setMotionStatus('Motion permission request failed');
-          setMotionSupported(false);
-        });
-    } else {
-      setMotionPermissionGranted(true);
-      setMotionStatus('Motion sensors available');
-    }
+    setMotionStatus('Device ID set. Tap "Enable Gyro Sensors" to activate fall detection.');
   };
 
   if (!isSetup) {
@@ -339,13 +563,81 @@ useEffect(() => {
           <p style={{ color: motionSupported ? '#a0aec0' : '#ff6b6b', fontSize:'0.8rem', margin:'0.5rem 0 0' }}>{motionStatus}</p>
         </div>
 
-        {/* Impact Alert Overlay */}
+        {/* FULLSCREEN EMERGENCY POPUP */}
         <AnimatePresence>
           {fallDetected && (
-            <motion.div initial={{ opacity:0, scale:0.8 }} animate={{ opacity:1, scale:1 }} exit={{ opacity:0 }}
-              style={{ background:'#ff4d6d', color:'white', padding:'1rem', borderRadius:12, marginBottom:'1rem', textAlign:'center', fontWeight:'bold', boxShadow:'0 0 20px rgba(255,77,109,0.5)' }}>
-              🚨 IMPACT ALERT!
-              <div style={{ fontSize:'0.8rem', fontWeight:'normal', marginTop:4 }}>Auto-transmitting location to Guardian...</div>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                background: 'rgba(0,0,0,0.9)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 9999
+              }}
+            >
+              <motion.div
+                initial={{ scale: 0.5, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.5, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 200 }}
+                style={{
+                  background: 'linear-gradient(135deg, #ff4d6d 0%, #ff7675 100%)',
+                  borderRadius: 20,
+                  padding: '2rem',
+                  textAlign: 'center',
+                  color: 'white',
+                  boxShadow: '0 0 60px rgba(255,77,109,0.6)',
+                  maxWidth: '90%',
+                  maxHeight: '80vh',
+                  overflow: 'auto'
+                }}
+              >
+                <motion.div
+                  animate={{ scale: [1, 1.2, 1] }}
+                  transition={{ repeat: Infinity, duration: 1 }}
+                  style={{ fontSize: '4rem', marginBottom: '1rem' }}
+                >
+                  🚨
+                </motion.div>
+
+                <h1 style={{ fontSize: '2.5rem', margin: '0 0 1rem', fontWeight: 900 }}>
+                  FALL DETECTED!
+                </h1>
+
+                <p style={{ fontSize: '1.1rem', margin: '0.5rem 0', fontWeight: 600 }}>
+                  Emergency alert is being sent
+                </p>
+
+                <div style={{ margin: '1.5rem 0', padding: '1rem', background: 'rgba(255,255,255,0.1)', borderRadius: 10 }}>
+                  <p style={{ margin: 0, fontSize: '1rem' }}>
+                    📍 Location: India (Guardian notified)
+                  </p>
+                  <p style={{ margin: '0.5rem 0 0', fontSize: '0.95rem' }}>
+                    Device ID: {deviceId}
+                  </p>
+                  {emergencySent && (
+                    <motion.p
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      style={{ margin: '1rem 0 0', color: '#00ff88', fontWeight: 700, fontSize: '1.1rem' }}
+                    >
+                      ✅ Emergency sent successfully!
+                    </motion.p>
+                  )}
+                </div>
+
+                <p style={{ fontSize: '0.9rem', margin: '1rem 0 0', opacity: 0.9 }}>
+                  {emergencySent ? 'Guardian has been alerted' : 'Please stay calm. Help is on the way.'}
+                </p>
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -361,6 +653,102 @@ useEffect(() => {
             </div>
           </div>
         </div>
+
+        {/* ENABLE GYRO SENSORS BUTTON */}
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={handleEnableGyro}
+          disabled={gyroActive}
+          style={{
+            ...styles.btnGreen,
+            background: gyroActive ? '#00ff88' : 'linear-gradient(135deg, #ff9500, #ff6b6b)',
+            boxShadow: gyroActive ? '0 0 20px rgba(0,255,136,0.4)' : '0 0 20px rgba(255,107,107,0.4)',
+            opacity: gyroActive ? 0.8 : 1,
+            cursor: gyroActive ? 'default' : 'pointer',
+            marginBottom: '1rem'
+          }}
+        >
+          {gyroActive ? '✅ Gyro Sensors Active' : '🔌 Enable Gyro Sensors'}
+        </motion.button>
+
+        {/* PERMISSION STATUS ALERT */}
+        {permissionDenied && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            style={{
+              background: '#ff4d6d',
+              color: 'white',
+              padding: '0.8rem',
+              borderRadius: 8,
+              marginBottom: '1rem',
+              fontSize: '0.85rem',
+              fontWeight: 600,
+              textAlign: 'center'
+            }}
+          >
+            ⚠️ Motion sensor permission denied. Fall detection will not work.
+          </motion.div>
+        )}
+
+        {/* SENSOR MONITOR TOGGLE */}
+        <button
+          onClick={() => setShowSensorMonitor(!showSensorMonitor)}
+          style={{
+            ...styles.statBox,
+            background: 'rgba(0,217,255,0.1)',
+            border: '1px solid rgba(0,217,255,0.5)',
+            cursor: 'pointer',
+            marginBottom: '1rem',
+            padding: '0.6rem',
+            borderRadius: 8,
+            color: '#00d9ff',
+            fontWeight: 600,
+            fontSize: '0.9rem'
+          }}
+        >
+          {showSensorMonitor ? '👁️ Hide' : '👁️ Show'} Sensor Monitor
+        </button>
+
+        {/* REAL-TIME SENSOR MONITOR */}
+        <AnimatePresence>
+          {showSensorMonitor && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              style={{
+                background: 'rgba(10,14,39,0.8)',
+                border: '1px solid #00d9ff',
+                borderRadius: 8,
+                padding: '1rem',
+                marginBottom: '1rem',
+                fontSize: '0.75rem',
+                fontFamily: 'monospace',
+                color: '#00d9ff',
+                maxHeight: '200px',
+                overflowY: 'auto'
+              }}
+            >
+              <div style={{ lineHeight: '1.6' }}>
+                <div>📊 ACCELEROMETER</div>
+                <div>X: {sensorData.accelX.toFixed(2)} | Y: {sensorData.accelY.toFixed(2)} | Z: {sensorData.accelZ.toFixed(2)}</div>
+                <div>Magnitude: <span style={{ color: sensorData.accelMag > 25 ? '#ff6b6b' : '#00ff88' }}>{sensorData.accelMag.toFixed(2)}</span></div>
+
+                <div style={{ marginTop: '0.5rem' }}>🔄 GYROSCOPE</div>
+                <div>α: {sensorData.gyroX.toFixed(1)}° | β: {sensorData.gyroY.toFixed(1)}° | γ: {sensorData.gyroZ.toFixed(1)}°</div>
+                <div>Rotation: <span style={{ color: sensorData.gyroMag > 150 ? '#ff6b6b' : '#00ff88' }}>{sensorData.gyroMag.toFixed(1)}</span></div>
+
+                <div style={{ marginTop: '0.5rem' }}>🧭 ORIENTATION</div>
+                <div>Tilt: {sensorData.beta.toFixed(1)}° | Roll: {sensorData.gamma.toFixed(1)}°</div>
+
+                <div style={{ marginTop: '0.5rem', color: gyroActive ? '#00ff88' : '#ff6b6b' }}>
+                  Status: {gyroActive ? '✅ Monitoring' : '⏸️ Inactive'}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Camera Heart Rate */}
         <div style={{ ...styles.statBox, borderColor: '#00d9ff' }}>
