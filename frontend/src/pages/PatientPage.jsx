@@ -21,6 +21,9 @@ export default function PatientPage() {
 
   const [fallDetected, setFallDetected] = useState(false);
   const sensorReadyRef = useRef(false);
+  const [motionStatus, setMotionStatus] = useState('Waiting for motion sensors...');
+  const [motionPermissionGranted, setMotionPermissionGranted] = useState(false);
+  const [motionSupported, setMotionSupported] = useState(true);
   const [spO2, setSpO2] = useState('');
   const [temperature, setTemperature] = useState('');
 
@@ -123,21 +126,17 @@ useEffect(() => {
     }
   };
 
-  // Request motion sensor permission (iOS 13+)
   if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-    DeviceMotionEvent.requestPermission()
-      .then(permissionState => {
-        if (permissionState === 'granted') {
-          window.addEventListener('devicemotion', handleMotion, false);
-          console.log("✅ Motion permission granted");
-        } else {
-          console.warn("Motion permission denied");
-        }
-      })
-      .catch(console.error);
+    if (motionPermissionGranted) {
+      window.addEventListener('devicemotion', handleMotion, false);
+      setMotionStatus('Motion sensors active');
+      console.log("✅ Motion permission granted and listener attached");
+    } else {
+      setMotionStatus('Tap Start Sensors and allow motion access');
+    }
   } else {
-    // Non-iOS devices, permission already granted
     window.addEventListener('devicemotion', handleMotion, false);
+    setMotionStatus('Motion sensors active');
   }
 
   return () => {
@@ -145,7 +144,7 @@ useEffect(() => {
     window.removeEventListener('devicemotion', handleMotion);
   };
 
-}, [isSetup, deviceId]);
+}, [isSetup, deviceId, motionPermissionGranted]);
 
   // 3. Camera Heart Rate Monitor (PPG - Photoplethysmography)
   const measureHeartRate = async () => {
@@ -284,13 +283,27 @@ useEffect(() => {
     if (!deviceId.trim()) return;
     localStorage.setItem('p_deviceId', deviceId.trim());
     setIsSetup(true);
-    
-    // Request permissions for iOS motion sensors (must be triggered by user action)
+
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      Promise.all([
-        DeviceMotionEvent.requestPermission?.(),
-        DeviceOrientationEvent.requestPermission?.()
-      ]).catch(console.error);
+      DeviceMotionEvent.requestPermission()
+        .then(permissionState => {
+          if (permissionState === 'granted') {
+            setMotionPermissionGranted(true);
+            setMotionStatus('Motion sensor access granted');
+          } else {
+            setMotionPermissionGranted(false);
+            setMotionStatus('Motion sensor access denied');
+            setMotionSupported(false);
+          }
+        })
+        .catch(err => {
+          console.error('Motion permission request failed', err);
+          setMotionStatus('Motion permission request failed');
+          setMotionSupported(false);
+        });
+    } else {
+      setMotionPermissionGranted(true);
+      setMotionStatus('Motion sensors available');
     }
   };
 
@@ -323,6 +336,7 @@ useEffect(() => {
           <div style={{ fontSize:'2.5rem' }}>⚕️</div>
           <h2 style={styles.title}>{APP_NAME} Sensors</h2>
           <p style={{ color:'#a0aec0', fontSize:'0.85rem', margin:0 }}>Device: <strong style={{ color:'#00d9ff' }}>{deviceId}</strong></p>
+          <p style={{ color: motionSupported ? '#a0aec0' : '#ff6b6b', fontSize:'0.8rem', margin:'0.5rem 0 0' }}>{motionStatus}</p>
         </div>
 
         {/* Impact Alert Overlay */}
